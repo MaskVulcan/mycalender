@@ -1,0 +1,25 @@
+from setuptools import setup, find_packages
+
+setup(
+    name="smart-calendar",
+    version="0.1.0",
+    packages=find_packages(),
+    install_requires=[
+        "python-frontmatter>=1.1.0",
+        "dateparser>=1.2.0",
+        "pendulum>=3.0.0",
+        "july>=0.1.3",
+        "matplotlib>=3.8.0",
+        "rich>=13.0.0",
+        "chinese-calendar>=1.9.0",
+        "playwright>=1.40.0",
+        "jinja2>=3.1.0",
+        "pyyaml>=6.0",
+    ],
+    entry_points={
+        "console_scripts": [
+            "sc=smart_calendar.cli:main",
+        ],
+    },
+    python_requires=">=3.10",
+)
