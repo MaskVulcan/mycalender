@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smart Calendar</title>
+<link rel="stylesheet" href="https://uicdn.toast.com/calendar/latest/toastui-calendar.min.css" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: #fff;
+  }
+  #header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 24px;
+    border-bottom: 1px solid #e8e8e8;
+  }
+  #header h1 {
+    font-size: 20px;
+    font-weight: 600;
+    color: #333;
+  }
+  #header .date-range {
+    font-size: 14px;
+    color: #666;
+  }
+  #legend {
+    display: flex;
+    gap: 16px;
+    padding: 8px 24px;
+    border-bottom: 1px solid #f0f0f0;
+    flex-wrap: wrap;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: #555;
+  }
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  #calendar-container {
+    height: {{ height }}px;
+    padding: 0;
+  }
+  /* 禁止 TOAST UI 内部滚动，让所有时间段完整展示 */
+  .toastui-calendar-panel-resizer,
+  .toastui-calendar-panel-resizer-guide { display: none !important; }
+  .toastui-calendar-time { overflow: visible !important; }
+  .toastui-calendar-panel:not(.toastui-calendar-time) { display: none !important; }
+  .toastui-calendar-week-view-day-names { position: sticky; top: 0; z-index: 10; }
+  [class*="toastui-calendar"] { overflow: visible !important; }
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>📅 {{ title }}</h1>
+  <span class="date-range">{{ date_range }}</span>
+</div>
+<div id="legend">
+  {% for cat_name, cat_info in categories.items() %}
+  <span class="legend-item">
+    <span class="legend-dot" style="background: {{ cat_info.color }};"></span>
+    {{ cat_info.icon }} {{ cat_name }}
+  </span>
+  {% endfor %}
+</div>
+<div id="calendar-container"></div>
+
+<script src="https://uicdn.toast.com/calendar/latest/toastui-calendar.min.js"></script>
+<script>
+const Calendar = tui.Calendar;
+
+// 类别 → 日历 ID 映射
+const calendars = [
+  {% for cat_name, cat_info in categories.items() %}
+  {
+    id: '{{ cat_name }}',
+    name: '{{ cat_name }}',
+    backgroundColor: '{{ cat_info.color }}',
+    borderColor: '{{ cat_info.color }}',
+    color: '#fff',
+  },
+  {% endfor %}
+];
+
+// 事件数据
+const events = [
+  {% for event in events %}
+  {
+    id: '{{ event.id }}',
+    calendarId: '{{ event.category }}',
+    title: '{{ event.icon }} {{ event.title }}',
+    start: '{{ event.start_iso }}',
+    end: '{{ event.end_iso }}',
+    category: 'time',
+    isReadOnly: true,
+    {% if event.location %}
+    location: '{{ event.location }}',
+    {% endif %}
+    {% if event.participants %}
+    attendees: [{% for p in event.participants %}'{{ p }}'{% if not loop.last %}, {% endif %}{% endfor %}],
+    {% endif %}
+  },
+  {% endfor %}
+];
+
+const cal = new Calendar('#calendar-container', {
+  defaultView: '{{ view }}',
+  usageStatistics: false,
+  isReadOnly: true,
+  useDetailPopup: false,
+  useFormPopup: false,
+  week: {
+    startDayOfWeek: 1,
+    dayNames: ['日', '一', '二', '三', '四', '五', '六'],
+    hourStart: {{ hour_start }},
+    hourEnd: {{ hour_end }},
+    taskView: false,
+    eventView: ['time'],
+    showNowIndicator: false,
+  },
+  month: {
+    startDayOfWeek: 1,
+    dayNames: ['日', '一', '二', '三', '四', '五', '六'],
+    isAlways6Weeks: false,
+  },
+  calendars: calendars,
+  template: {
+    monthDayName(model) {
+      return `<span>${model.label}</span>`;
+    },
+    time(event) {
+      return `<span style="font-size:11px">${event.title}</span>`;
+    },
+    allday(event) {
+      return `<span>${event.title}</span>`;
+    },
+  },
+  timezone: {
+    zones: [{ timezoneName: 'Asia/Shanghai' }],
+  },
+});
+
+// 设置日期并加载事件
+cal.setDate(new Date('{{ focus_date }}'));
+cal.createEvents(events);
+</script>
+</body>
+</html>

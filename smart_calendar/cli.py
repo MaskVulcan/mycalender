@@ -220,6 +220,131 @@ def cmd_delete(args):
         print(f"❌ 未找到: {args.event_id}")
 
 
+# ─── render 命令 ──────────────────────────────────────────────
+
+
+def cmd_render(args):
+    """生成日历图片"""
+    config, store, parser, query, agg, render = _build_services()
+
+    import pendulum
+
+    now = pendulum.now(config.timezone)
+
+    # 确定时间范围
+    if args.range:
+        result = parser.parse_range(args.range)
+        if result:
+            start, end = result
+        else:
+            print(f"❌ 无法识别范围: {args.range}")
+            sys.exit(1)
+    elif args.month:
+        start = now.start_of("month").date()
+        end = now.end_of("month").date()
+    else:
+        # 默认本周
+        start = now.start_of("week").date()
+        end = now.end_of("week").date()
+
+    # 输出路径
+    output_dir = config.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.heatmap:
+        # ── 热力图模式 ──
+        from smart_calendar.render.heatmap_render import HeatmapRender
+
+        heatmap = HeatmapRender(config)
+        category = args.heatmap
+
+        all_events = store.get_range(start, end)
+
+        if category == "__all__":
+            # 所有类别对比热力图
+            categories = list({e.category for e in all_events})
+            if not categories:
+                print("📊 该时段暂无日程数据")
+                return
+            period = "month" if args.month else "week"
+            results = agg.compare(all_events, categories, period)
+            out = output_dir / "heatmap_compare.png"
+            heatmap.render_category_comparison(results, out)
+            print(f"✅ 类别对比热力图已生成: {out}")
+        elif args.year:
+            # 全年热力图
+            year_start = from_date = pendulum.date(now.year, 1, 1)
+            year_end = pendulum.date(now.year, 12, 31)
+            year_events = store.get_range(year_start, year_end)
+            filtered = [e for e in year_events if e.category == category]
+            from collections import Counter
+
+            daily = dict(Counter(e.date for e in filtered))
+            icon = config.get_category_icon(category)
+            cmap = config.get_category_cmap(category)
+            out = output_dir / f"heatmap_{category}_year.png"
+            heatmap.render_year(daily, out, year=now.year, title=f"{icon} {now.year}年「{category}」", cmap=cmap)
+            print(f"✅ 年度热力图已生成: {out}")
+        else:
+            # 单月/单周热力图
+            period = "month" if args.month else "week"
+            result = agg.summary(all_events, category, period)
+            out = output_dir / f"heatmap_{category}_{period}.png"
+            heatmap.render_month(result, out)
+            print(f"✅ 热力图已生成: {out}")
+
+        # 渲染统计文字（对比模式用 compare，单类别用 stats）
+        if not args.year:
+            period = "month" if args.month else "week"
+            if category == "__all__":
+                categories = list({e.category for e in all_events})
+                results = agg.compare(all_events, categories, period)
+                render.render_compare(results)
+            else:
+                result = agg.summary(all_events, category, period)
+                render.render_stats(result)
+
+    else:
+        # ── 日历图模式（TOAST UI）──
+        from smart_calendar.render.calendar_render import CalendarRender
+
+        cal_render = CalendarRender(config)
+
+        view = args.view or "week"
+        events = store.get_range(start, end)
+
+        # focus_date: 视图中心日期
+        if view == "month":
+            focus = start.replace(day=15)
+        elif view == "day" and args.date:
+            focus = parser.parse_date_only(args.date) or start
+        else:
+            focus = start
+
+        date_range_str = f"{parser.format_date(start)} ~ {parser.format_date(end)}"
+        out = output_dir / f"calendar_{view}.png"
+
+        print(f"🎨 正在生成 {view} 视图日历图...")
+        cal_render.render_png(
+            events,
+            output_path=out,
+            view=view,
+            focus_date=focus,
+            title="Smart Calendar",
+            date_range=date_range_str,
+        )
+        print(f"✅ 日历图已生成: {out}")
+
+        # 同时输出文字版
+        render.render_schedule(events, title=f"📅 {date_range_str}")
+
+    # 尝试用系统默认应用打开图片
+    if args.open:
+        import subprocess
+
+        subprocess.run(["open", str(out)], check=False)
+
+
 # ─── 主入口 ──────────────────────────────────────────────────
 
 
@@ -260,6 +385,18 @@ def main():
     p_stats.add_argument("--week", "-w", action="store_true", help="统计本周")
     p_stats.add_argument("--all", "-a", action="store_true", help="所有类别对比")
     p_stats.set_defaults(func=cmd_stats)
+
+    # ── render ──
+    p_render = subparsers.add_parser("render", help="生成日历图片")
+    p_render.add_argument("--view", "-v", choices=["month", "week", "day"], help="日历视图 (TOAST UI)")
+    p_render.add_argument("--heatmap", help="热力图模式：指定类别名，或 __all__ 对比全部")
+    p_render.add_argument("--week", "-w", action="store_true", help="本周范围")
+    p_render.add_argument("--month", "-m", action="store_true", help="本月范围")
+    p_render.add_argument("--year", "-y", action="store_true", help="全年热力图")
+    p_render.add_argument("--range", "-r", help="日期范围")
+    p_render.add_argument("--date", "-d", help="指定日期（day 视图用）")
+    p_render.add_argument("--open", "-o", action="store_true", help="生成后自动打开图片")
+    p_render.set_defaults(func=cmd_render)
 
     # ── delete ──
     p_del = subparsers.add_parser("delete", help="删除日程")
