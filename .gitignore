@@ -1,0 +1,35 @@
+# User data (personal schedules)
+data/events/
+data/people/
+data/config.yml
+
+# Generated output
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Playwright browsers
+.playwright/
