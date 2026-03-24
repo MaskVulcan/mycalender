@@ -10,6 +10,7 @@ from pathlib import Path
 
 from smart_calendar.utils.config import Config
 from smart_calendar.storage.event_store import Event, EventStore
+from smart_calendar.storage.people_store import Person, PeopleStore
 from smart_calendar.parser.date_parser import DateParser
 from smart_calendar.query.engine import QueryEngine
 from smart_calendar.query.aggregator import Aggregator
@@ -27,11 +28,12 @@ def _build_services(base_dir: Path | None = None):
         base_dir = _get_base_dir()
     config = Config(base_dir)
     store = EventStore(config.events_dir)
+    people = PeopleStore(config.people_dir)
     parser = DateParser(config.timezone)
     query = QueryEngine(store)
     aggregator = Aggregator(config.timezone)
     render = TextRender(config)
-    return config, store, parser, query, aggregator, render
+    return config, store, people, parser, query, aggregator, render
 
 
 # ─── add 命令 ───────────────────────────────────────────────
@@ -39,7 +41,7 @@ def _build_services(base_dir: Path | None = None):
 
 def cmd_add(args):
     """添加日程"""
-    config, store, parser, query, agg, render = _build_services()
+    config, store, people, parser, query, agg, render = _build_services()
 
     text = " ".join(args.text)
 
@@ -122,7 +124,7 @@ def _extract_title(text: str) -> str:
 
 def cmd_show(args):
     """查询并展示日程"""
-    config, store, parser, query, agg, render = _build_services()
+    config, store, people, parser, query, agg, render = _build_services()
 
     # 确定查询范围
     if args.range:
@@ -180,13 +182,35 @@ def cmd_show(args):
 
     render.render_schedule(events, title=title.strip())
 
+    # 展示日程中涉及的已知人物的协作提示
+    all_participants = set()
+    for e in events:
+        for p in e.participants:
+            all_participants.add(p)
+    if all_participants:
+        tips_shown = False
+        for name in sorted(all_participants):
+            person = people.get(name)
+            if person and (person.collaboration_tips or person.personality):
+                if not tips_shown:
+                    print("\n💡 协作备忘:")
+                    tips_shown = True
+                parts = []
+                if person.personality:
+                    parts.append(f"性格: {'; '.join(person.personality[:2])}")
+                if person.collaboration_tips:
+                    parts.append(f"建议: {'; '.join(person.collaboration_tips[:2])}")
+                print(f"   👤 {name} — {' | '.join(parts)}")
+        if tips_shown:
+            print()
+
 
 # ─── stats 命令 ───────────────────────────────────────────────
 
 
 def cmd_stats(args):
     """类别聚合统计"""
-    config, store, parser, query, agg, render = _build_services()
+    config, store, people, parser, query, agg, render = _build_services()
 
     period = "week" if args.week else "month"
 
@@ -213,7 +237,7 @@ def cmd_stats(args):
 
 def cmd_delete(args):
     """删除日程"""
-    _, store, _, _, _, _ = _build_services()
+    _, store, _, _, _, _, _ = _build_services()
     if store.delete(args.event_id):
         print(f"✅ 已删除: {args.event_id}")
     else:
@@ -225,7 +249,7 @@ def cmd_delete(args):
 
 def cmd_render(args):
     """生成日历图片"""
-    config, store, parser, query, agg, render = _build_services()
+    config, store, people, parser, query, agg, render = _build_services()
 
     import pendulum
 
@@ -345,6 +369,138 @@ def cmd_render(args):
         subprocess.run(["open", str(out)], check=False)
 
 
+# ─── people 命令 ─────────────────────────────────────────────
+
+
+def cmd_people(args):
+    """人物档案管理"""
+    config, store, people, parser, query, agg, render = _build_services()
+
+    action = args.action
+
+    if action == "add":
+        name = args.name
+        if not name:
+            print("❌ 请指定姓名，如 sc people add 张总")
+            sys.exit(1)
+
+        person = people.get(name)
+        if person:
+            print(f"⚠️  「{name}」已存在，使用 'sc people show {name}' 查看")
+            return
+
+        person = Person(
+            name=name,
+            role=args.role or "",
+            contact=args.contact or "",
+            tags=[t.strip() for t in args.tags.split(",")] if args.tags else [],
+        )
+
+        # 性格特征
+        if args.personality:
+            person.personality = [p.strip() for p in args.personality.split(",")]
+
+        # 协作建议
+        if args.tips:
+            person.collaboration_tips = [t.strip() for t in args.tips.split(",")]
+
+        people.add(person)
+        print(f"\n✅ 人物档案已创建: {name}")
+        render.render_person(person)
+
+    elif action == "show":
+        name = args.name
+        if not name:
+            print("❌ 请指定姓名，如 sc people show 张总")
+            sys.exit(1)
+        person = people.get(name)
+        if not person:
+            print(f"❌ 未找到「{name}」的档案")
+            sys.exit(1)
+        render.render_person(person)
+
+        # 同时展示与此人相关的近期日程
+        from datetime import date, timedelta
+
+        start = date.today() - timedelta(days=30)
+        end = date.today() + timedelta(days=30)
+        events = query.by_participant(name, start, end)
+        if events:
+            render.render_schedule(events, title=f"📅 与「{name}」相关的近期日程")
+
+    elif action == "note":
+        name = args.name
+        if not name:
+            print("❌ 请指定姓名")
+            sys.exit(1)
+        note_text = " ".join(args.note_text) if args.note_text else ""
+        if not note_text:
+            print("❌ 请提供备注内容，如 sc people note 张总 喜欢早上开会")
+            sys.exit(1)
+
+        # 判断是添加性格、协作建议还是自由笔记
+        if args.as_personality:
+            person = people.add_personality(name, note_text)
+            label = "性格特征"
+        elif args.as_tip:
+            person = people.add_tip(name, note_text)
+            label = "协作建议"
+        else:
+            person = people.add_note(name, note_text)
+            label = "备忘"
+
+        if person:
+            print(f"✅ 已为「{name}」添加{label}: {note_text}")
+        else:
+            print(f"❌ 未找到「{name}」的档案，请先用 'sc people add {name}' 创建")
+
+    elif action == "list":
+        keyword = args.name
+        if keyword:
+            persons = people.search(keyword)
+            if not persons:
+                print(f"🔍 未找到匹配「{keyword}」的人物")
+                return
+        else:
+            persons = people.list_all()
+        render.render_people_list(persons)
+
+    elif action == "update":
+        name = args.name
+        if not name:
+            print("❌ 请指定姓名")
+            sys.exit(1)
+        kwargs = {}
+        if args.role:
+            kwargs["role"] = args.role
+        if args.contact:
+            kwargs["contact"] = args.contact
+        if args.tags:
+            kwargs["tags"] = [t.strip() for t in args.tags.split(",")]
+        if not kwargs:
+            print("❌ 请指定要更新的字段，如 --role, --contact, --tags")
+            sys.exit(1)
+        person = people.update(name, **kwargs)
+        if person:
+            print(f"✅ 已更新「{name}」的档案")
+            render.render_person(person)
+        else:
+            print(f"❌ 未找到「{name}」的档案")
+
+    elif action == "delete":
+        name = args.name
+        if not name:
+            print("❌ 请指定姓名")
+            sys.exit(1)
+        if people.delete(name):
+            print(f"✅ 已删除「{name}」的档案")
+        else:
+            print(f"❌ 未找到「{name}」的档案")
+
+    else:
+        print("❌ 未知操作，可用: add, show, note, list, update, delete")
+
+
 # ─── 主入口 ──────────────────────────────────────────────────
 
 
@@ -397,6 +553,21 @@ def main():
     p_render.add_argument("--date", "-d", help="指定日期（day 视图用）")
     p_render.add_argument("--open", "-o", action="store_true", help="生成后自动打开图片")
     p_render.set_defaults(func=cmd_render)
+
+    # ── people ──
+    p_people = subparsers.add_parser("people", help="人物档案管理")
+    p_people.add_argument("action", choices=["add", "show", "note", "list", "update", "delete"],
+                          help="操作: add/show/note/list/update/delete")
+    p_people.add_argument("name", nargs="?", help="人物姓名")
+    p_people.add_argument("note_text", nargs="*", help="备注内容（note 操作时使用）")
+    p_people.add_argument("--role", help="角色/职位")
+    p_people.add_argument("--contact", help="联系方式")
+    p_people.add_argument("--tags", help="标签，逗号分隔")
+    p_people.add_argument("--personality", help="性格特征，逗号分隔（add 时使用）")
+    p_people.add_argument("--tips", help="协作建议，逗号分隔（add 时使用）")
+    p_people.add_argument("--as-personality", action="store_true", help="note 操作: 标记内容为性格特征")
+    p_people.add_argument("--as-tip", action="store_true", help="note 操作: 标记内容为协作建议")
+    p_people.set_defaults(func=cmd_people)
 
     # ── delete ──
     p_del = subparsers.add_parser("delete", help="删除日程")

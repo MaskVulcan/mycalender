@@ -11,8 +11,10 @@ from rich.table import Table
 from rich.text import Text
 
 from smart_calendar.storage.event_store import Event
+from smart_calendar.storage.people_store import Person
 from smart_calendar.query.aggregator import AggResult
 from smart_calendar.utils.config import Config
+from smart_calendar.utils.holidays import get_day_label
 
 
 _WEEKDAY_ZH = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
@@ -50,10 +52,14 @@ class TextRender:
 
         last_date = None
         for event in events_sorted:
-            # 日期列：同一天只显示第一次
+            # 日期列：同一天只显示第一次，标注节假日
             if event.date != last_date:
                 weekday = _WEEKDAY_ZH[event.date.weekday()]
-                date_str = f"{event.date.month}.{event.date.day} {weekday}"
+                holiday = get_day_label(event.date)
+                if holiday and not holiday == "休":
+                    date_str = f"{event.date.month}.{event.date.day} {weekday}\n{holiday}"
+                else:
+                    date_str = f"{event.date.month}.{event.date.day} {weekday}"
                 last_date = event.date
             else:
                 date_str = ""
@@ -125,5 +131,59 @@ class TextRender:
                 f"{r.active_days}/{r.total_days}",
                 r.peak_weekday,
             )
+
+        self.console.print(table)
+
+    def render_person(self, person: Person):
+        """渲染单个人物档案"""
+        from rich.markdown import Markdown
+
+        # 基本信息面板
+        lines = [f"[bold]{person.name}[/bold]"]
+        if person.role:
+            lines.append(f"[dim]角色:[/dim] {person.role}")
+        if person.contact:
+            lines.append(f"[dim]联系:[/dim] {person.contact}")
+        if person.tags:
+            tags = " ".join(f"[cyan]#{t}[/cyan]" for t in person.tags)
+            lines.append(f"[dim]标签:[/dim] {tags}")
+
+        self.console.print(Panel("\n".join(lines), title="👤 人物档案", border_style="green"))
+
+        # 性格特征
+        if person.personality:
+            self.console.print("\n[bold]🧠 性格特征[/bold]")
+            for trait in person.personality:
+                self.console.print(f"  • {trait}")
+
+        # 协作建议
+        if person.collaboration_tips:
+            self.console.print("\n[bold]💡 协作建议[/bold]")
+            for tip in person.collaboration_tips:
+                self.console.print(f"  • {tip}")
+
+        # 自由笔记
+        if person.notes.strip():
+            self.console.print("\n[bold]📝 备忘[/bold]")
+            self.console.print(Markdown(person.notes))
+
+    def render_people_list(self, people: list[Person]):
+        """渲染人物列表"""
+        if not people:
+            self.console.print(Panel("[dim]暂无人物档案[/dim]", title="👥 人物列表"))
+            return
+
+        table = Table(title="👥 人物列表", show_lines=True, border_style="green")
+        table.add_column("姓名", style="bold", width=10)
+        table.add_column("角色", style="cyan", width=12)
+        table.add_column("性格要点", min_width=20)
+        table.add_column("标签", style="dim", width=14)
+
+        for p in people:
+            personality = "; ".join(p.personality[:2])
+            if len(p.personality) > 2:
+                personality += f" (+{len(p.personality) - 2})"
+            tags = ", ".join(p.tags) if p.tags else ""
+            table.add_row(p.name, p.role, personality, tags)
 
         self.console.print(table)
