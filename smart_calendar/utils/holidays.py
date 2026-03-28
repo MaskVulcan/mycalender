@@ -35,9 +35,10 @@ def get_day_type(dt: date) -> str:
         "workday" — 工作日
     """
     try:
-        if is_holiday(dt):
-            if is_in_lieu(dt):
-                return "in_lieu"
+        if is_in_lieu(dt):
+            # 调休补班日：该休息却要上班（is_workday=True, is_holiday=False）
+            return "in_lieu"
+        elif is_holiday(dt):
             return "holiday"
         elif is_workday(dt):
             return "workday"

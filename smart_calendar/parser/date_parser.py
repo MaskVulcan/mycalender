@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, date, time
-from typing import Optional
+from datetime import datetime, date
 import re
 
 import dateparser
 import pendulum
 
-
-# pendulum 中文星期映射
-_WEEKDAY_ZH = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+from smart_calendar.utils.constants import WEEKDAY_ZH
 
 
 class DateParser:
@@ -284,7 +281,7 @@ class DateParser:
 
     def format_date(self, dt: date) -> str:
         """格式化日期为中文: "3月25日 周三" """
-        weekday = _WEEKDAY_ZH[dt.weekday()]
+        weekday = WEEKDAY_ZH[dt.weekday()]
         return f"{dt.month}月{dt.day}日 {weekday}"
 
     def format_datetime(self, dt: datetime) -> str:

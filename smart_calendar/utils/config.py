@@ -1,5 +1,6 @@
 """配置加载器 — 读取 data/config.yml"""
 
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +41,7 @@ class Config:
             with open(config_path, "r", encoding="utf-8") as f:
                 self._data = yaml.safe_load(f) or {}
         else:
-            self._data = _DEFAULT_CONFIG.copy()
+            self._data = copy.deepcopy(_DEFAULT_CONFIG)
 
     @property
     def categories(self) -> dict[str, dict]:
@@ -67,6 +68,12 @@ class Config:
     @property
     def people_dir(self) -> Path:
         return self.data_dir / "people"
+
+    @property
+    def work_hours(self) -> tuple[int, int]:
+        """返回工作时间范围 (start_hour, end_hour)"""
+        wh = self._data.get("defaults", {}).get("work_hours", [9, 18])
+        return wh[0], wh[1]
 
     def get_category_icon(self, category: str) -> str:
         return self.categories.get(category, {}).get("icon", "📌")

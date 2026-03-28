@@ -9,9 +9,7 @@ from datetime import date, timedelta
 import pendulum
 
 from smart_calendar.storage.event_store import Event
-
-
-_WEEKDAY_ZH = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+from smart_calendar.utils.constants import WEEKDAY_ZH
 
 
 @dataclass
@@ -35,8 +33,15 @@ class Aggregator:
     def __init__(self, timezone: str = "Asia/Shanghai"):
         self.timezone = timezone
 
-    def _get_period_range(self, period: str) -> tuple[date, date, str]:
-        """获取周期的日期范围和显示标签"""
+    def get_period_range(self, period: str) -> tuple[date, date, str]:
+        """获取周期的日期范围和显示标签。
+
+        Args:
+            period: "week" / "month" / "year"
+
+        Returns:
+            (start, end, label) 元组
+        """
         now = pendulum.now(self.timezone)
 
         if period == "week":
@@ -61,7 +66,7 @@ class Aggregator:
 
     def summary(self, events: list[Event], category: str, period: str = "month") -> AggResult:
         """计算某类别在指定周期内的聚合统计"""
-        start, end, label = self._get_period_range(period)
+        start, end, label = self.get_period_range(period)
 
         # 筛选该类别 + 时间范围内的事件
         filtered = [
@@ -90,7 +95,7 @@ class Aggregator:
                     peak_avg = avg
                     peak_weekday_idx = wd
 
-        active_days = sum(1 for c in daily.values() if c > 0)
+        active_days = len(daily)  # Counter 只含 > 0 的条目
         total = len(filtered)
         avg = total / total_days if total_days > 0 else 0
 
@@ -100,7 +105,7 @@ class Aggregator:
             total=total,
             daily_counts=all_days,
             avg_per_day=round(avg, 2),
-            peak_weekday=_WEEKDAY_ZH[peak_weekday_idx],
+            peak_weekday=WEEKDAY_ZH[peak_weekday_idx],
             peak_count=round(peak_avg, 2),
             active_days=active_days,
             total_days=total_days,

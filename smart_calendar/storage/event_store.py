@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
 
 import frontmatter
 
@@ -109,6 +109,60 @@ class EventStore:
         self._save_file(path, events, body)
         return event
 
+    def find_conflicts(self, event_date: date, time_str: str) -> list[Event]:
+        """检查指定日期和时间段是否与已有日程冲突。
+
+        Args:
+            event_date: 事件日期
+            time_str: 时间字符串，如 "14:00" 或 "14:00-15:30"
+
+        Returns:
+            重叠的已有日程列表
+        """
+        existing = self.get(event_date)
+        if not existing:
+            return []
+
+        # 解析新事件的起止分钟数
+        new_start, new_end = self._parse_time_range(time_str)
+        if new_start is None:
+            return []
+
+        conflicts = []
+        for e in existing:
+            e_start, e_end = self._parse_time_range(e.time)
+            if e_start is None:
+                continue
+            # 两个时间段有重叠的条件
+            if new_start < e_end and new_end > e_start:
+                conflicts.append(e)
+        return conflicts
+
+    @staticmethod
+    def _parse_time_range(time_str: str) -> tuple[int | None, int | None]:
+        """将时间字符串解析为 (开始分钟数, 结束分钟数)。
+
+        "14:00" → (840, 900)        # 默认 1 小时
+        "14:00-15:30" → (840, 930)
+        """
+        parts = time_str.split("-")
+        try:
+            h, m = (int(x) for x in parts[0].strip().split(":"))
+            start_min = h * 60 + m
+        except (ValueError, IndexError):
+            return None, None
+
+        if len(parts) > 1:
+            try:
+                eh, em = (int(x) for x in parts[1].strip().split(":"))
+                end_min = eh * 60 + em
+            except (ValueError, IndexError):
+                end_min = start_min + 60
+        else:
+            end_min = start_min + 60
+
+        return start_min, end_min
+
     def get(self, dt: date) -> list[Event]:
         """获取某天的全部日程"""
         path = self._date_to_path(dt)
@@ -119,14 +173,37 @@ class EventStore:
         return events
 
     def get_range(self, start: date, end: date) -> list[Event]:
-        """获取日期范围内的全部日程（含首尾）"""
-        from datetime import timedelta
-
+        """获取日期范围内的全部日程（含首尾），只遍历涉及的年/月目录"""
         all_events: list[Event] = []
-        current = start
+
+        # 按年月剪枝：只遍历 start~end 涉及的 YYYY/MM 目录
+        current = start.replace(day=1)
+        visited_months: set[tuple[int, int]] = set()
         while current <= end:
-            all_events.extend(self.get(current))
-            current += timedelta(days=1)
+            ym = (current.year, current.month)
+            if ym not in visited_months:
+                visited_months.add(ym)
+                month_dir = self.events_dir / str(current.year) / f"{current.month:02d}"
+                if month_dir.is_dir():
+                    for md_path in sorted(month_dir.glob("*.md")):
+                        try:
+                            day = int(md_path.stem)
+                            file_date = date(current.year, current.month, day)
+                        except (ValueError, IndexError):
+                            continue
+                        if start <= file_date <= end:
+                            events_data, _ = self._load_file(md_path)
+                            events = [Event.from_dict(e, event_date=file_date) for e in events_data]
+                            events.sort(key=lambda e: (e.start_hour, e.start_minute))
+                            all_events.extend(events)
+            # 跳到下个月
+            if current.month == 12:
+                current = current.replace(year=current.year + 1, month=1)
+            else:
+                current = current.replace(month=current.month + 1)
+
+        # 按日期 + 时间排序
+        all_events.sort(key=lambda e: (e.date, e.start_hour, e.start_minute))
         return all_events
 
     def update(self, event_id: str, **kwargs) -> Event | None:
@@ -170,6 +247,9 @@ class EventStore:
     def _find_by_id(self, event_id: str) -> Event | None:
         """根据 ID 查找事件（从 ID 提取日期缩小搜索范围）"""
         # ID 格式: evt_YYYYMMDD_xxxx
+        if not re.match(r"^evt_\d{8}_[a-f0-9]+$", event_id):
+            return None
+
         try:
             date_str = event_id.split("_")[1]
             dt = date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]))

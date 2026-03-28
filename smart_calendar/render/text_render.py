@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import date
-from itertools import groupby
 
 from rich.console import Console
 from rich.panel import Panel
@@ -14,10 +13,8 @@ from smart_calendar.storage.event_store import Event
 from smart_calendar.storage.people_store import Person
 from smart_calendar.query.aggregator import AggResult
 from smart_calendar.utils.config import Config
+from smart_calendar.utils.constants import WEEKDAY_ZH
 from smart_calendar.utils.holidays import get_day_label
-
-
-_WEEKDAY_ZH = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
 # priority 样式
 _PRIORITY_STYLE = {
@@ -54,9 +51,9 @@ class TextRender:
         for event in events_sorted:
             # 日期列：同一天只显示第一次，标注节假日
             if event.date != last_date:
-                weekday = _WEEKDAY_ZH[event.date.weekday()]
+                weekday = WEEKDAY_ZH[event.date.weekday()]
                 holiday = get_day_label(event.date)
-                if holiday and not holiday == "休":
+                if holiday and holiday != "休":
                     date_str = f"{event.date.month}.{event.date.day} {weekday}\n{holiday}"
                 else:
                     date_str = f"{event.date.month}.{event.date.day} {weekday}"

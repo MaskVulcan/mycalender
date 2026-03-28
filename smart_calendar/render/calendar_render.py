@@ -86,10 +86,9 @@ class CalendarRender:
         size = _SIZE_MAP.get(view, _SIZE_MAP["week"])
 
         # 动态计算小时范围：覆盖所有事件
-        default_start = self.config._data.get("defaults", {}).get("work_hours", [9, 18])[0]
-        default_end = self.config._data.get("defaults", {}).get("work_hours", [9, 18])[1]
-        hour_start = default_start
-        hour_end = default_end + 1
+        work_start, work_end = self.config.work_hours
+        hour_start = work_start
+        hour_end = work_end + 1
 
         for e in events:
             if e.start_hour > 0:
@@ -150,8 +149,18 @@ class CalendarRender:
                 device_scale_factor=2,
             )
             page.set_content(html)
-            # 等待 TOAST UI Calendar JS 加载和渲染
-            page.wait_for_timeout(3000)
+            # 等待 TOAST UI Calendar 渲染完成（DOM 元素就绪）
+            try:
+                page.wait_for_selector(
+                    ".toastui-calendar-layout",
+                    state="attached",
+                    timeout=10000,
+                )
+                # 额外等待短暂时间确保事件渲染到位
+                page.wait_for_timeout(500)
+            except Exception:
+                # fallback: 如果选择器未找到，等待固定时间
+                page.wait_for_timeout(3000)
             page.screenshot(path=str(output_path), full_page=True)
             browser.close()
 

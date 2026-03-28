@@ -17,23 +17,77 @@ from smart_calendar.query.aggregator import Aggregator
 from smart_calendar.render.text_render import TextRender
 
 
-def _get_base_dir() -> Path:
-    """获取项目根目录（mycalendar/）"""
-    return Path(__file__).resolve().parent.parent
+# ─── 自定义异常 ──────────────────────────────────────────────
 
 
-def _build_services(base_dir: Path | None = None):
-    """构建所有服务实例"""
-    if base_dir is None:
-        base_dir = _get_base_dir()
-    config = Config(base_dir)
-    store = EventStore(config.events_dir)
-    people = PeopleStore(config.people_dir)
-    parser = DateParser(config.timezone)
-    query = QueryEngine(store)
-    aggregator = Aggregator(config.timezone)
-    render = TextRender(config)
-    return config, store, people, parser, query, aggregator, render
+class CalendarError(Exception):
+    """Smart Calendar 业务异常（用户输入错误等）"""
+
+
+# ─── 服务容器（按需构建） ──────────────────────────────────────
+
+
+class _Services:
+    """按需构建服务实例，避免每次 CLI 调用都初始化全部组件"""
+
+    def __init__(self, base_dir: Path | None = None):
+        if base_dir is None:
+            base_dir = Path(__file__).resolve().parent.parent
+        self._base_dir = base_dir
+        self._config: Config | None = None
+        self._store: EventStore | None = None
+        self._people: PeopleStore | None = None
+        self._parser: DateParser | None = None
+        self._query: QueryEngine | None = None
+        self._aggregator: Aggregator | None = None
+        self._render: TextRender | None = None
+
+    @property
+    def config(self) -> Config:
+        if self._config is None:
+            self._config = Config(self._base_dir)
+        return self._config
+
+    @property
+    def store(self) -> EventStore:
+        if self._store is None:
+            self._store = EventStore(self.config.events_dir)
+        return self._store
+
+    @property
+    def people(self) -> PeopleStore:
+        if self._people is None:
+            self._people = PeopleStore(self.config.people_dir)
+        return self._people
+
+    @property
+    def parser(self) -> DateParser:
+        if self._parser is None:
+            self._parser = DateParser(self.config.timezone)
+        return self._parser
+
+    @property
+    def query(self) -> QueryEngine:
+        if self._query is None:
+            self._query = QueryEngine(self.store)
+        return self._query
+
+    @property
+    def aggregator(self) -> Aggregator:
+        if self._aggregator is None:
+            self._aggregator = Aggregator(self.config.timezone)
+        return self._aggregator
+
+    @property
+    def render(self) -> TextRender:
+        if self._render is None:
+            self._render = TextRender(self.config)
+        return self._render
+
+
+def _svc() -> _Services:
+    """获取服务容器实例"""
+    return _Services()
 
 
 # ─── add 命令 ───────────────────────────────────────────────
@@ -41,22 +95,21 @@ def _build_services(base_dir: Path | None = None):
 
 def cmd_add(args):
     """添加日程"""
-    config, store, people, parser, query, agg, render = _build_services()
+    svc = _svc()
 
     text = " ".join(args.text)
 
     # 解析日期
-    dt = parser.parse(text)
+    dt = svc.parser.parse(text)
     if dt is None and args.date:
-        dt = parser.parse(args.date)
+        dt = svc.parser.parse(args.date)
     if dt is None:
-        print("❌ 无法识别日期，请用 --date 指定，如 --date '明天' 或 --date '2026-03-25'")
-        sys.exit(1)
+        raise CalendarError("无法识别日期，请用 --date 指定，如 --date '明天' 或 --date '2026-03-25'")
 
     event_date = dt.date() if hasattr(dt, "date") and callable(dt.date) else dt
 
     # 解析时间
-    time_str = args.time or parser.parse_time_only(text)
+    time_str = args.time or svc.parser.parse_time_only(text)
     if not time_str:
         time_str = f"{dt.hour:02d}:{dt.minute:02d}" if dt.hour or dt.minute else "09:00"
 
@@ -83,13 +136,21 @@ def cmd_add(args):
         priority=args.priority or "normal",
     )
 
-    event = store.add(event)
+    # 冲突检测
+    conflicts = svc.store.find_conflicts(event_date, time_str)
+    if conflicts:
+        print(f"\n⚠️  时间冲突提醒 — {svc.parser.format_date(event_date)} {time_str}:")
+        for c in conflicts:
+            print(f"   • {c.time} {c.title}")
+        print("   （日程仍已添加，请注意安排）")
+
+    event = svc.store.add(event)
 
     # 展示确认
-    icon = config.get_category_icon(category)
+    icon = svc.config.get_category_icon(category)
     print(f"\n✅ 日程已添加:")
     print(f"   {icon} {event.title}")
-    print(f"   📆 {parser.format_date(event.date)} {event.time}")
+    print(f"   📆 {svc.parser.format_date(event.date)} {event.time}")
     if participants:
         print(f"   👥 {', '.join(participants)}")
     if event.notes:
@@ -97,24 +158,27 @@ def cmd_add(args):
     print(f"   🔖 ID: {event.id}\n")
 
 
+# 预编译标题提取正则（模块级缓存，避免每次调用重复编译）
+_TITLE_PATTERNS = [re.compile(p) for p in [
+    r"\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[日号]?",  # 2026-03-25
+    r"\d{1,2}[月./]\d{1,2}[号日]?",               # 3月28号
+    r"(?:这|本|下|上)周[一二三四五六日天]",           # 下周三
+    r"(?:这|本|下|上)(?:周|个?月)",                  # 下周/这个月
+    r"(?:今天|明天|后天|大后天)",                     # 明天
+    r"(?:上午|下午|晚上|早上|中午)",                  # 下午
+    r"\d{1,2}[点时:：]\d{0,2}[分半]?",              # 3点/3点半/14:00
+    r"^和(?=\S)",                                   # 句首 "和" 后紧跟人名
+]]
+_TITLE_CLEANUP_RE = re.compile(r"^[和与\s，,。.、]+")
+
+
 def _extract_title(text: str) -> str:
     """从自然语言中提取事件标题（去掉日期时间词）"""
-    # 移除常见的日期时间表达（顺序很重要，长模式先匹配）
-    patterns = [
-        r"\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[日号]?",  # 2026-03-25
-        r"\d{1,2}[月./]\d{1,2}[号日]?",               # 3月28号
-        r"(?:这|本|下|上)周[一二三四五六日天]",           # 下周三
-        r"(?:这|本|下|上)(?:周|个?月)",                  # 下周/这个月
-        r"(?:今天|明天|后天|大后天)",                     # 明天
-        r"(?:上午|下午|晚上|早上|中午)",                  # 下午
-        r"\d{1,2}[点时:：]\d{0,2}[分半]?",              # 3点/3点半/14:00
-        r"^[和跟]",                                     # 句首的"和"
-    ]
     result = text
-    for p in patterns:
-        result = re.sub(p, "", result)
-    # 清理残余的连接词和标点
-    result = re.sub(r"^[和跟与\s，,。.、]+", "", result)
+    for p in _TITLE_PATTERNS:
+        result = p.sub("", result)
+    # 清理残余的连接词和标点（仅清理 "和"、"与"，不清理 "跟"）
+    result = _TITLE_CLEANUP_RE.sub("", result)
     result = result.strip().strip("，,。. ")
     return result if result else text
 
@@ -124,35 +188,33 @@ def _extract_title(text: str) -> str:
 
 def cmd_show(args):
     """查询并展示日程"""
-    config, store, people, parser, query, agg, render = _build_services()
+    svc = _svc()
 
     # 确定查询范围
     if args.range:
-        result = parser.parse_range(args.range)
+        result = svc.parser.parse_range(args.range)
         if result:
             start, end = result
         else:
-            print(f"❌ 无法识别范围: {args.range}")
-            sys.exit(1)
+            raise CalendarError(f"无法识别范围: {args.range}")
     elif args.month:
         import pendulum
 
-        now = pendulum.now(config.timezone)
+        now = pendulum.now(svc.config.timezone)
         start = now.start_of("month").date()
         end = now.end_of("month").date()
     elif args.week:
         import pendulum
 
-        now = pendulum.now(config.timezone)
+        now = pendulum.now(svc.config.timezone)
         start = now.start_of("week").date()
         end = now.end_of("week").date()
     elif args.date:
-        dt = parser.parse_date_only(args.date)
+        dt = svc.parser.parse_date_only(args.date)
         if dt:
             start = end = dt
         else:
-            print(f"❌ 无法识别日期: {args.date}")
-            sys.exit(1)
+            raise CalendarError(f"无法识别日期: {args.date}")
     else:
         # 默认：未来 7 天
         start = date.today()
@@ -160,27 +222,27 @@ def cmd_show(args):
 
     # 查询
     if args.category:
-        events = query.by_category(args.category, start, end)
+        events = svc.query.by_category(args.category, start, end)
         title_suffix = f"[{args.category}]"
     elif args.with_people:
-        events = query.by_participant(args.with_people, start, end)
+        events = svc.query.by_participant(args.with_people, start, end)
         title_suffix = f"[与{args.with_people}]"
     elif args.search:
-        events = query.search(args.search, start, end)
+        events = svc.query.search(args.search, start, end)
         title_suffix = f"[搜索: {args.search}]"
     else:
-        events = query.by_range(start, end)
+        events = svc.query.by_range(start, end)
         title_suffix = ""
 
     # 构建标题
-    date_label = parser.format_date(start)
+    date_label = svc.parser.format_date(start)
     if start == end:
         title = f"📅 {date_label} {title_suffix}"
     else:
-        end_label = parser.format_date(end)
+        end_label = svc.parser.format_date(end)
         title = f"📅 {date_label} ~ {end_label} {title_suffix}"
 
-    render.render_schedule(events, title=title.strip())
+    svc.render.render_schedule(events, title=title.strip())
 
     # 展示日程中涉及的已知人物的协作提示
     all_participants = set()
@@ -190,7 +252,7 @@ def cmd_show(args):
     if all_participants:
         tips_shown = False
         for name in sorted(all_participants):
-            person = people.get(name)
+            person = svc.people.get(name)
             if person and (person.collaboration_tips or person.personality):
                 if not tips_shown:
                     print("\n💡 协作备忘:")
@@ -210,13 +272,13 @@ def cmd_show(args):
 
 def cmd_stats(args):
     """类别聚合统计"""
-    config, store, people, parser, query, agg, render = _build_services()
+    svc = _svc()
 
     period = "week" if args.week else "month"
 
     # 获取时间范围内的所有事件
-    start, end, _ = agg._get_period_range(period)
-    all_events = store.get_range(start, end)
+    start, end, _ = svc.aggregator.get_period_range(period)
+    all_events = svc.store.get_range(start, end)
 
     if args.all:
         # 所有类别对比
@@ -224,12 +286,51 @@ def cmd_stats(args):
         if not categories:
             print("📊 该时段暂无日程数据")
             return
-        results = agg.compare(all_events, categories, period)
-        render.render_compare(results)
+        results = svc.aggregator.compare(all_events, categories, period)
+        svc.render.render_compare(results)
     else:
         category = args.category or "其他"
-        result = agg.summary(all_events, category, period)
-        render.render_stats(result)
+        result = svc.aggregator.summary(all_events, category, period)
+        svc.render.render_stats(result)
+
+
+# ─── edit 命令 ───────────────────────────────────────────────
+
+
+def cmd_edit(args):
+    """编辑日程"""
+    svc = _svc()
+
+    kwargs = {}
+    if args.title:
+        kwargs["title"] = args.title
+    if args.time:
+        kwargs["time"] = args.time
+    if args.category:
+        kwargs["category"] = args.category
+    if args.with_people is not None:
+        kwargs["participants"] = [p.strip() for p in args.with_people.split(",")]
+    if args.location is not None:
+        kwargs["location"] = args.location
+    if args.notes is not None:
+        kwargs["notes"] = args.notes
+    if args.priority:
+        kwargs["priority"] = args.priority
+
+    if not kwargs:
+        raise CalendarError("请至少指定一个要修改的字段，如 --title, --time, --category 等")
+
+    updated = svc.store.update(args.event_id, **kwargs)
+    if updated:
+        icon = svc.config.get_category_icon(updated.category)
+        print(f"\n✅ 日程已更新:")
+        print(f"   {icon} {updated.title}")
+        print(f"   📆 {svc.parser.format_date(updated.date)} {updated.time}")
+        if updated.participants:
+            print(f"   👥 {', '.join(updated.participants)}")
+        print(f"   🔖 ID: {updated.id}\n")
+    else:
+        raise CalendarError(f"未找到: {args.event_id}")
 
 
 # ─── delete 命令 ──────────────────────────────────────────────
@@ -237,8 +338,8 @@ def cmd_stats(args):
 
 def cmd_delete(args):
     """删除日程"""
-    _, store, _, _, _, _, _ = _build_services()
-    if store.delete(args.event_id):
+    svc = _svc()
+    if svc.store.delete(args.event_id):
         print(f"✅ 已删除: {args.event_id}")
     else:
         print(f"❌ 未找到: {args.event_id}")
@@ -249,20 +350,19 @@ def cmd_delete(args):
 
 def cmd_render(args):
     """生成日历图片"""
-    config, store, people, parser, query, agg, render = _build_services()
+    svc = _svc()
 
     import pendulum
 
-    now = pendulum.now(config.timezone)
+    now = pendulum.now(svc.config.timezone)
 
     # 确定时间范围
     if args.range:
-        result = parser.parse_range(args.range)
+        result = svc.parser.parse_range(args.range)
         if result:
             start, end = result
         else:
-            print(f"❌ 无法识别范围: {args.range}")
-            sys.exit(1)
+            raise CalendarError(f"无法识别范围: {args.range}")
     elif args.month:
         start = now.start_of("month").date()
         end = now.end_of("month").date()
@@ -272,17 +372,18 @@ def cmd_render(args):
         end = now.end_of("week").date()
 
     # 输出路径
-    output_dir = config.output_dir
+    output_dir = svc.config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    out = None  # 防止提前 return 时 out 未定义
 
     if args.heatmap:
         # ── 热力图模式 ──
         from smart_calendar.render.heatmap_render import HeatmapRender
 
-        heatmap = HeatmapRender(config)
+        heatmap = HeatmapRender(svc.config)
         category = args.heatmap
 
-        all_events = store.get_range(start, end)
+        all_events = svc.store.get_range(start, end)
 
         if category == "__all__":
             # 所有类别对比热力图
@@ -291,61 +392,54 @@ def cmd_render(args):
                 print("📊 该时段暂无日程数据")
                 return
             period = "month" if args.month else "week"
-            results = agg.compare(all_events, categories, period)
+            results = svc.aggregator.compare(all_events, categories, period)
             out = output_dir / "heatmap_compare.png"
             heatmap.render_category_comparison(results, out)
             print(f"✅ 类别对比热力图已生成: {out}")
+            # 同时输出文字统计（复用已有 results）
+            svc.render.render_compare(results)
         elif args.year:
             # 全年热力图
-            year_start = from_date = pendulum.date(now.year, 1, 1)
-            year_end = pendulum.date(now.year, 12, 31)
-            year_events = store.get_range(year_start, year_end)
-            filtered = [e for e in year_events if e.category == category]
             from collections import Counter
 
+            year_start = pendulum.date(now.year, 1, 1)
+            year_end = pendulum.date(now.year, 12, 31)
+            year_events = svc.store.get_range(year_start, year_end)
+            filtered = [e for e in year_events if e.category == category]
             daily = dict(Counter(e.date for e in filtered))
-            icon = config.get_category_icon(category)
-            cmap = config.get_category_cmap(category)
+            icon = svc.config.get_category_icon(category)
+            cmap = svc.config.get_category_cmap(category)
             out = output_dir / f"heatmap_{category}_year.png"
             heatmap.render_year(daily, out, year=now.year, title=f"{icon} {now.year}年「{category}」", cmap=cmap)
             print(f"✅ 年度热力图已生成: {out}")
         else:
             # 单月/单周热力图
             period = "month" if args.month else "week"
-            result = agg.summary(all_events, category, period)
+            result = svc.aggregator.summary(all_events, category, period)
             out = output_dir / f"heatmap_{category}_{period}.png"
             heatmap.render_month(result, out)
             print(f"✅ 热力图已生成: {out}")
-
-        # 渲染统计文字（对比模式用 compare，单类别用 stats）
-        if not args.year:
-            period = "month" if args.month else "week"
-            if category == "__all__":
-                categories = list({e.category for e in all_events})
-                results = agg.compare(all_events, categories, period)
-                render.render_compare(results)
-            else:
-                result = agg.summary(all_events, category, period)
-                render.render_stats(result)
+            # 同时输出文字统计（复用已有 result）
+            svc.render.render_stats(result)
 
     else:
         # ── 日历图模式（TOAST UI）──
         from smart_calendar.render.calendar_render import CalendarRender
 
-        cal_render = CalendarRender(config)
+        cal_render = CalendarRender(svc.config)
 
         view = args.view or "week"
-        events = store.get_range(start, end)
+        events = svc.store.get_range(start, end)
 
         # focus_date: 视图中心日期
         if view == "month":
             focus = start.replace(day=15)
         elif view == "day" and args.date:
-            focus = parser.parse_date_only(args.date) or start
+            focus = svc.parser.parse_date_only(args.date) or start
         else:
             focus = start
 
-        date_range_str = f"{parser.format_date(start)} ~ {parser.format_date(end)}"
+        date_range_str = f"{svc.parser.format_date(start)} ~ {svc.parser.format_date(end)}"
         out = output_dir / f"calendar_{view}.png"
 
         print(f"🎨 正在生成 {view} 视图日历图...")
@@ -360,145 +454,161 @@ def cmd_render(args):
         print(f"✅ 日历图已生成: {out}")
 
         # 同时输出文字版
-        render.render_schedule(events, title=f"📅 {date_range_str}")
+        svc.render.render_schedule(events, title=f"📅 {date_range_str}")
 
-    # 尝试用系统默认应用打开图片
-    if args.open:
+    # 尝试用系统默认应用打开图片（跨平台）
+    if args.open and out and out.exists():
         import subprocess
 
-        subprocess.run(["open", str(out)], check=False)
+        if sys.platform == "darwin":
+            subprocess.run(["open", str(out)], check=False)
+        elif sys.platform == "linux":
+            subprocess.run(["xdg-open", str(out)], check=False)
+        elif sys.platform == "win32":
+            import os
+            os.startfile(str(out))
 
 
-# ─── people 命令 ─────────────────────────────────────────────
+# ─── people 子命令 ───────────────────────────────────────────
+
+
+def _require_name(args) -> str:
+    """校验并返回人物姓名"""
+    if not args.name:
+        raise CalendarError("请指定姓名")
+    return args.name
+
+
+def _cmd_people_add(args, svc: _Services):
+    """people add: 创建人物档案"""
+    name = _require_name(args)
+
+    person = svc.people.get(name)
+    if person:
+        print(f"⚠️  「{name}」已存在，使用 'sc people show {name}' 查看")
+        return
+
+    person = Person(
+        name=name,
+        role=args.role or "",
+        contact=args.contact or "",
+        tags=[t.strip() for t in args.tags.split(",")] if args.tags else [],
+    )
+
+    if args.personality:
+        person.personality = [p.strip() for p in args.personality.split(",")]
+    if args.tips:
+        person.collaboration_tips = [t.strip() for t in args.tips.split(",")]
+
+    svc.people.add(person)
+    print(f"\n✅ 人物档案已创建: {name}")
+    svc.render.render_person(person)
+
+
+def _cmd_people_show(args, svc: _Services):
+    """people show: 查看人物档案"""
+    name = _require_name(args)
+
+    person = svc.people.get(name)
+    if not person:
+        raise CalendarError(f"未找到「{name}」的档案")
+    svc.render.render_person(person)
+
+    # 同时展示与此人相关的近期日程
+    start = date.today() - timedelta(days=30)
+    end = date.today() + timedelta(days=30)
+    events = svc.query.by_participant(name, start, end)
+    if events:
+        svc.render.render_schedule(events, title=f"📅 与「{name}」相关的近期日程")
+
+
+def _cmd_people_note(args, svc: _Services):
+    """people note: 追加备注"""
+    name = _require_name(args)
+
+    note_text = " ".join(args.note_text) if args.note_text else ""
+    if not note_text:
+        raise CalendarError("请提供备注内容，如 sc people note 张总 喜欢早上开会")
+
+    if args.as_personality:
+        person = svc.people.add_personality(name, note_text)
+        label = "性格特征"
+    elif args.as_tip:
+        person = svc.people.add_tip(name, note_text)
+        label = "协作建议"
+    else:
+        person = svc.people.add_note(name, note_text)
+        label = "备忘"
+
+    if person:
+        print(f"✅ 已为「{name}」添加{label}: {note_text}")
+    else:
+        raise CalendarError(f"未找到「{name}」的档案，请先用 'sc people add {name}' 创建")
+
+
+def _cmd_people_list(args, svc: _Services):
+    """people list: 列出/搜索人物"""
+    keyword = args.name
+    if keyword:
+        persons = svc.people.search(keyword)
+        if not persons:
+            print(f"🔍 未找到匹配「{keyword}」的人物")
+            return
+    else:
+        persons = svc.people.list_all()
+    svc.render.render_people_list(persons)
+
+
+def _cmd_people_update(args, svc: _Services):
+    """people update: 更新人物字段"""
+    name = _require_name(args)
+
+    kwargs = {}
+    if args.role:
+        kwargs["role"] = args.role
+    if args.contact:
+        kwargs["contact"] = args.contact
+    if args.tags:
+        kwargs["tags"] = [t.strip() for t in args.tags.split(",")]
+    if not kwargs:
+        raise CalendarError("请指定要更新的字段，如 --role, --contact, --tags")
+
+    person = svc.people.update(name, **kwargs)
+    if person:
+        print(f"✅ 已更新「{name}」的档案")
+        svc.render.render_person(person)
+    else:
+        raise CalendarError(f"未找到「{name}」的档案")
+
+
+def _cmd_people_delete(args, svc: _Services):
+    """people delete: 删除人物档案"""
+    name = _require_name(args)
+
+    if svc.people.delete(name):
+        print(f"✅ 已删除「{name}」的档案")
+    else:
+        raise CalendarError(f"未找到「{name}」的档案")
+
+
+_PEOPLE_ACTIONS = {
+    "add": _cmd_people_add,
+    "show": _cmd_people_show,
+    "note": _cmd_people_note,
+    "list": _cmd_people_list,
+    "update": _cmd_people_update,
+    "delete": _cmd_people_delete,
+}
 
 
 def cmd_people(args):
     """人物档案管理"""
-    config, store, people, parser, query, agg, render = _build_services()
-
-    action = args.action
-
-    if action == "add":
-        name = args.name
-        if not name:
-            print("❌ 请指定姓名，如 sc people add 张总")
-            sys.exit(1)
-
-        person = people.get(name)
-        if person:
-            print(f"⚠️  「{name}」已存在，使用 'sc people show {name}' 查看")
-            return
-
-        person = Person(
-            name=name,
-            role=args.role or "",
-            contact=args.contact or "",
-            tags=[t.strip() for t in args.tags.split(",")] if args.tags else [],
-        )
-
-        # 性格特征
-        if args.personality:
-            person.personality = [p.strip() for p in args.personality.split(",")]
-
-        # 协作建议
-        if args.tips:
-            person.collaboration_tips = [t.strip() for t in args.tips.split(",")]
-
-        people.add(person)
-        print(f"\n✅ 人物档案已创建: {name}")
-        render.render_person(person)
-
-    elif action == "show":
-        name = args.name
-        if not name:
-            print("❌ 请指定姓名，如 sc people show 张总")
-            sys.exit(1)
-        person = people.get(name)
-        if not person:
-            print(f"❌ 未找到「{name}」的档案")
-            sys.exit(1)
-        render.render_person(person)
-
-        # 同时展示与此人相关的近期日程
-        from datetime import date, timedelta
-
-        start = date.today() - timedelta(days=30)
-        end = date.today() + timedelta(days=30)
-        events = query.by_participant(name, start, end)
-        if events:
-            render.render_schedule(events, title=f"📅 与「{name}」相关的近期日程")
-
-    elif action == "note":
-        name = args.name
-        if not name:
-            print("❌ 请指定姓名")
-            sys.exit(1)
-        note_text = " ".join(args.note_text) if args.note_text else ""
-        if not note_text:
-            print("❌ 请提供备注内容，如 sc people note 张总 喜欢早上开会")
-            sys.exit(1)
-
-        # 判断是添加性格、协作建议还是自由笔记
-        if args.as_personality:
-            person = people.add_personality(name, note_text)
-            label = "性格特征"
-        elif args.as_tip:
-            person = people.add_tip(name, note_text)
-            label = "协作建议"
-        else:
-            person = people.add_note(name, note_text)
-            label = "备忘"
-
-        if person:
-            print(f"✅ 已为「{name}」添加{label}: {note_text}")
-        else:
-            print(f"❌ 未找到「{name}」的档案，请先用 'sc people add {name}' 创建")
-
-    elif action == "list":
-        keyword = args.name
-        if keyword:
-            persons = people.search(keyword)
-            if not persons:
-                print(f"🔍 未找到匹配「{keyword}」的人物")
-                return
-        else:
-            persons = people.list_all()
-        render.render_people_list(persons)
-
-    elif action == "update":
-        name = args.name
-        if not name:
-            print("❌ 请指定姓名")
-            sys.exit(1)
-        kwargs = {}
-        if args.role:
-            kwargs["role"] = args.role
-        if args.contact:
-            kwargs["contact"] = args.contact
-        if args.tags:
-            kwargs["tags"] = [t.strip() for t in args.tags.split(",")]
-        if not kwargs:
-            print("❌ 请指定要更新的字段，如 --role, --contact, --tags")
-            sys.exit(1)
-        person = people.update(name, **kwargs)
-        if person:
-            print(f"✅ 已更新「{name}」的档案")
-            render.render_person(person)
-        else:
-            print(f"❌ 未找到「{name}」的档案")
-
-    elif action == "delete":
-        name = args.name
-        if not name:
-            print("❌ 请指定姓名")
-            sys.exit(1)
-        if people.delete(name):
-            print(f"✅ 已删除「{name}」的档案")
-        else:
-            print(f"❌ 未找到「{name}」的档案")
-
+    svc = _svc()
+    handler = _PEOPLE_ACTIONS.get(args.action)
+    if handler:
+        handler(args, svc)
     else:
-        print("❌ 未知操作，可用: add, show, note, list, update, delete")
+        raise CalendarError("未知操作，可用: add, show, note, list, update, delete")
 
 
 # ─── 主入口 ──────────────────────────────────────────────────
@@ -569,6 +679,18 @@ def main():
     p_people.add_argument("--as-tip", action="store_true", help="note 操作: 标记内容为协作建议")
     p_people.set_defaults(func=cmd_people)
 
+    # ── edit ──
+    p_edit = subparsers.add_parser("edit", help="编辑日程")
+    p_edit.add_argument("event_id", help="事件 ID")
+    p_edit.add_argument("--title", help="新标题")
+    p_edit.add_argument("--time", "-t", help="新时间")
+    p_edit.add_argument("--category", "-c", help="新类别")
+    p_edit.add_argument("--with", dest="with_people", help="新参与人，逗号分隔")
+    p_edit.add_argument("--location", "-l", help="新地点")
+    p_edit.add_argument("--notes", "-n", help="新备注")
+    p_edit.add_argument("--priority", "-p", choices=["high", "normal", "low"], help="新优先级")
+    p_edit.set_defaults(func=cmd_edit)
+
     # ── delete ──
     p_del = subparsers.add_parser("delete", help="删除日程")
     p_del.add_argument("event_id", help="事件 ID")
@@ -580,7 +702,11 @@ def main():
         parser.print_help()
         sys.exit(0)
 
-    args.func(args)
+    try:
+        args.func(args)
+    except CalendarError as e:
+        print(f"❌ {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
